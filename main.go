@@ -28,9 +28,24 @@ type user struct {
 	Login string `json:"login"`
 }
 
+type prFile struct {
+	Filename string `json:"filename"`
+}
+
 type result struct {
 	pr  pr
 	err error
+}
+
+type filesResult struct {
+	number int
+	files  []prFile
+	err    error
+}
+
+type crossConflict struct {
+	file string
+	prs  []pr
 }
 
 func fetchPRs(client *api.RESTClient, owner, name string, numbers []int) []result {
@@ -55,10 +70,78 @@ func fetchPRs(client *api.RESTClient, owner, name string, numbers []int) []resul
 	return results
 }
 
+func fetchPRFiles(client *api.RESTClient, owner, name string, numbers []int) []filesResult {
+	sem := make(chan struct{}, 8)
+	results := make([]filesResult, len(numbers))
+	var wg sync.WaitGroup
+
+	for i, num := range numbers {
+		wg.Add(1)
+		go func(i, num int) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			var allFiles []prFile
+			for page := 1; ; page++ {
+				var pageFiles []prFile
+				path := fmt.Sprintf("repos/%s/%s/pulls/%d/files?per_page=100&page=%d", owner, name, num, page)
+				if err := client.Get(path, &pageFiles); err != nil {
+					results[i] = filesResult{number: num, err: err}
+					return
+				}
+				allFiles = append(allFiles, pageFiles...)
+				if len(pageFiles) < 100 {
+					break
+				}
+			}
+			results[i] = filesResult{number: num, files: allFiles}
+		}(i, num)
+	}
+	wg.Wait()
+	return results
+}
+
+func findCrossConflicts(prs []pr, filesByPR map[int][]prFile) []crossConflict {
+	prByNum := make(map[int]pr, len(prs))
+	for _, p := range prs {
+		prByNum[p.Number] = p
+	}
+
+	filePRNums := make(map[string][]int)
+	for _, p := range prs {
+		for _, f := range filesByPR[p.Number] {
+			filePRNums[f.Filename] = append(filePRNums[f.Filename], p.Number)
+		}
+	}
+
+	var conflicts []crossConflict
+	for file, nums := range filePRNums {
+		if len(nums) < 2 {
+			continue
+		}
+		cPRs := make([]pr, 0, len(nums))
+		for _, num := range nums {
+			cPRs = append(cPRs, prByNum[num])
+		}
+		sort.Slice(cPRs, func(i, j int) bool {
+			return cPRs[i].Number > cPRs[j].Number
+		})
+		conflicts = append(conflicts, crossConflict{file: file, prs: cPRs})
+	}
+
+	sort.Slice(conflicts, func(i, j int) bool {
+		return conflicts[i].file < conflicts[j].file
+	})
+
+	return conflicts
+}
+
 func main() {
 	repoFlag := flag.String("repo", "", "owner/repo (auto-detected from git remote if omitted)")
 	authorFlag := flag.String("author", "", "GitHub username to filter by (defaults to authenticated user)")
 	conflictsOnly := flag.Bool("conflicts-only", false, "only show PRs with merge conflicts")
+	crossPR := flag.Bool("cross-pr", false, "also check for file overlaps between open PRs")
 	flag.Parse()
 
 	client, err := api.DefaultRESTClient()
@@ -186,7 +269,43 @@ func main() {
 	}
 
 	fmt.Printf("\n%d conflict(s) among %d open PRs\n", conflicts, len(prs))
-	if conflicts > 0 {
+
+	crossConflicts := 0
+	if *crossPR && len(prs) > 1 {
+		fmt.Println()
+		fmt.Println("Checking for cross-PR file overlaps...")
+
+		fileResults := fetchPRFiles(client, repoOwner, repoName, numbers)
+		filesByPR := make(map[int][]prFile, len(prs))
+		for _, fr := range fileResults {
+			if fr.err != nil {
+				fmt.Fprintf(os.Stderr, "error fetching files for PR #%d: %v\n", fr.number, fr.err)
+				continue
+			}
+			filesByPR[fr.number] = fr.files
+		}
+
+		overlaps := findCrossConflicts(prs, filesByPR)
+		if len(overlaps) == 0 {
+			fmt.Println("\nNo cross-PR file overlaps found.")
+		} else {
+			crossConflicts = len(overlaps)
+			fmt.Printf("\n%d file(s) shared across PRs:\n", crossConflicts)
+			for _, c := range overlaps {
+				fmt.Printf("\n  %s\n", c.file)
+				for _, p := range c.prs {
+					title := p.Title
+					if len(title) > 60 {
+						title = title[:57] + "..."
+					}
+					fmt.Printf("    #%-5d  %s\n", p.Number, title)
+				}
+			}
+			fmt.Println()
+		}
+	}
+
+	if conflicts > 0 || crossConflicts > 0 {
 		os.Exit(1)
 	}
 }
