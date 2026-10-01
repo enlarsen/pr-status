@@ -1,4 +1,4 @@
-module github.com/enlarsen/pr-conflicts
+module github.com/enlarsen/pr-status
 
 go 1.25.0
 
