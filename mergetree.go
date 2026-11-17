@@ -148,6 +148,7 @@ func runAgainst(gql *api.GraphQLClient, rest *api.RESTClient, owner, name, dir, 
 		die("fetching PR heads failed: %v", err)
 	}
 
+	var stale []int
 	for _, c := range cands {
 		prRef := fmt.Sprintf("refs/pr-status/pull/%d", c.pr.Number)
 		label := prLabel(c.pr)
@@ -156,26 +157,32 @@ func runAgainst(gql *api.GraphQLClient, rest *api.RESTClient, owner, name, dir, 
 			fmt.Printf("  %s\n      error: %v\n", label, err)
 			continue
 		}
-		target := landed
-		note := ""
 		if !ok {
-			// The PR conflicts with base already; fall back to a direct pairwise merge.
-			target = prRef
-			note = " (that PR already conflicts with " + base + "; pairwise result)"
+			// The PR conflicts with base already, so it can't land as-is and there is
+			// no honest "after it lands" state to test against. A direct pairwise merge
+			// would count every base change since that PR branched as if this branch
+			// had made it, reporting conflicts in files this branch never touched.
+			// That PR has to be rebased first; it's checked properly once it is.
+			stale = append(stale, c.pr.Number)
+			fmt.Printf("  %s\n      skipped: already conflicts with %s, so it must be rebased before it can land (shares: %s)\n", label, base, strings.Join(c.shared, ", "))
+			continue
 		}
-		r, err := trialMerge(dir, head, target)
+		r, err := trialMerge(dir, head, landed)
 		if err != nil {
 			fmt.Printf("  %s\n      error: %v\n", label, err)
 			continue
 		}
 		if len(r.conflicted) > 0 {
 			conflicts++
-			fmt.Printf("  %s\n      CONFLICT%s: %s\n", label, note, strings.Join(r.conflicted, ", "))
+			fmt.Printf("  %s\n      CONFLICT: %s\n", label, strings.Join(r.conflicted, ", "))
 		} else {
-			fmt.Printf("  %s\n      same file(s), merges cleanly%s: %s\n", label, note, strings.Join(c.shared, ", "))
+			fmt.Printf("  %s\n      same file(s), merges cleanly: %s\n", label, strings.Join(c.shared, ", "))
 		}
 	}
 	fmt.Println()
+	if len(stale) > 0 {
+		fmt.Printf("Skipped %d PR(s) that already conflict with %s: %s. Not counted; rerun once they're rebased.\n", len(stale), base, joinNums(stale))
+	}
 	if conflicts > 0 {
 		fmt.Printf("%d real conflict(s). Whichever PR merges second will need a rebase.\n", conflicts)
 	} else {

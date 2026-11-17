@@ -102,7 +102,7 @@ This trial-merges your branch with `git merge-tree`, in memory, without touching
       same file(s), merges cleanly: packages/.../wa-results-cli.md
 ```
 
-If the other PR already conflicts with the base branch, the tool falls back to a direct pairwise merge and says so.
+If the other PR already conflicts with the base branch, it is listed as skipped and not counted. It can't land without a rebase, and merging the two branches directly would count every base-branch change since that PR branched as if your branch had made it, reporting conflicts in files you never touched. Rerun once it has been rebased.
 
 PR heads are fetched into `refs/pr-status/pull/<n>` in your clone, so later runs fetch only what changed. To remove them:
 
