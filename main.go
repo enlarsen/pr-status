@@ -49,17 +49,13 @@ type user struct {
 
 type prFile struct {
 	Filename string `json:"filename"`
+	Patch    string `json:"patch"`
 }
 
 type filesResult struct {
 	number int
 	files  []prFile
 	err    error
-}
-
-type crossConflict struct {
-	file string
-	prs  []pr
 }
 
 type checkSummary struct {
@@ -233,48 +229,22 @@ func fetchPRFiles(client *api.RESTClient, owner, name string, numbers []int) []f
 	return results
 }
 
-func findCrossConflicts(prs []pr, filesByPR map[int][]prFile) []crossConflict {
-	prByNum := make(map[int]pr, len(prs))
-	for _, p := range prs {
-		prByNum[p.Number] = p
-	}
-
-	filePRNums := make(map[string][]int)
-	for _, p := range prs {
-		for _, f := range filesByPR[p.Number] {
-			filePRNums[f.Filename] = append(filePRNums[f.Filename], p.Number)
-		}
-	}
-
-	var conflicts []crossConflict
-	for file, nums := range filePRNums {
-		if len(nums) < 2 {
-			continue
-		}
-		cPRs := make([]pr, 0, len(nums))
-		for _, num := range nums {
-			cPRs = append(cPRs, prByNum[num])
-		}
-		sort.Slice(cPRs, func(i, j int) bool {
-			return cPRs[i].Number > cPRs[j].Number
-		})
-		conflicts = append(conflicts, crossConflict{file: file, prs: cPRs})
-	}
-
-	sort.Slice(conflicts, func(i, j int) bool {
-		return conflicts[i].file < conflicts[j].file
-	})
-
-	return conflicts
-}
-
 func main() {
 	repoFlag := flag.String("repo", "", "owner/repo (auto-detected from git remote if omitted)")
 	authorFlag := flag.String("author", "", "GitHub username to filter by (defaults to authenticated user)")
 	approvedOnly := flag.Bool("approved", false, "only check approved PRs; exit 1 if any is not ready to merge")
 	readyOnly := flag.Bool("ready-only", false, "only show PRs that are ready to merge")
 	conflictsOnly := flag.Bool("conflicts-only", false, "only show PRs with merge conflicts")
-	crossPR := flag.Bool("cross-pr", false, "also check for file overlaps between open PRs")
+	crossPR := flag.Bool("cross-pr", false, "also check for file and line overlaps between open PRs")
+	allAuthors := flag.Bool("all-authors", false, "with -cross-pr, compare your PRs against every open PR, not just each other")
+	filesMode := flag.Bool("files", false, "pre-flight: list open PRs (all authors) touching the paths given as arguments, by section")
+	against := flag.String("against", "", "pre-push: trial-merge this local ref against the base branch and every open PR sharing a file")
+	dirFlag := flag.String("C", ".", "local clone of the repo, for section names (-files) and trial merges (-against)")
+	includeBulk := flag.Bool("include-bulk", false, "include bulk PRs (rolling translation PR, develop-to-master sync)")
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, "usage: pr-status [flags]\n       pr-status -files [flags] <path>...\n       pr-status -against <ref> [flags]\n\n")
+		flag.PrintDefaults()
+	}
 	flag.Parse()
 
 	client, err := api.DefaultRESTClient()
@@ -303,6 +273,31 @@ func main() {
 			os.Exit(1)
 		}
 		repoOwner, repoName = r.Owner, r.Name
+	}
+
+	if *filesMode || *against != "" {
+		if *filesMode && *against != "" {
+			fmt.Fprintln(os.Stderr, "use -files or -against, not both")
+			os.Exit(2)
+		}
+		if *filesMode {
+			if flag.NArg() == 0 {
+				fmt.Fprintln(os.Stderr, "-files needs one or more paths")
+				os.Exit(2)
+			}
+			dir := *dirFlag
+			if _, err := git(dir, "rev-parse", "--git-dir"); err != nil {
+				dir = "" // no clone: report line ranges instead of sections
+			}
+			if runFiles(gqlClient, client, repoOwner, repoName, dir, flag.Args(), *includeBulk, nil) > 0 {
+				os.Exit(1)
+			}
+			return
+		}
+		if runAgainst(gqlClient, client, repoOwner, repoName, *dirFlag, *against, *includeBulk) > 0 {
+			os.Exit(1)
+		}
+		return
 	}
 
 	author := *authorFlag
@@ -398,42 +393,8 @@ func main() {
 	fmt.Printf("\n%d of %d %s PRs ready to merge, %d conflict(s)\n", ready, len(prs), kind, conflicts)
 
 	crossConflicts := 0
-	if *crossPR && len(prs) > 1 {
-		fmt.Println()
-		fmt.Println("Checking for cross-PR file overlaps...")
-
-		numbers := make([]int, len(prs))
-		for i, p := range prs {
-			numbers[i] = p.Number
-		}
-		fileResults := fetchPRFiles(client, repoOwner, repoName, numbers)
-		filesByPR := make(map[int][]prFile, len(prs))
-		for _, fr := range fileResults {
-			if fr.err != nil {
-				fmt.Fprintf(os.Stderr, "error fetching files for PR #%d: %v\n", fr.number, fr.err)
-				continue
-			}
-			filesByPR[fr.number] = fr.files
-		}
-
-		overlaps := findCrossConflicts(prs, filesByPR)
-		if len(overlaps) == 0 {
-			fmt.Println("\nNo cross-PR file overlaps found.")
-		} else {
-			crossConflicts = len(overlaps)
-			fmt.Printf("\n%d file(s) shared across PRs:\n", crossConflicts)
-			for _, c := range overlaps {
-				fmt.Printf("\n  %s\n", c.file)
-				for _, p := range c.prs {
-					title := p.Title
-					if len(title) > 60 {
-						title = title[:57] + "..."
-					}
-					fmt.Printf("    #%-5d  %s\n", p.Number, title)
-				}
-			}
-			fmt.Println()
-		}
+	if *crossPR {
+		crossConflicts = runCrossPR(gqlClient, client, repoOwner, repoName, prs, *allAuthors, *includeBulk)
 	}
 
 	if conflicts > 0 || crossConflicts > 0 || (*approvedOnly && ready < len(prs)) {
