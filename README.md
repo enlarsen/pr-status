@@ -80,6 +80,8 @@ pr-status -files packages/developer-hub/content/2/en/get-started/dh-understand-r
         §Learn More About Accessibility Issues, -§Comparison Table, §Rules List, +§Issue Groups
 ```
 
+PRs are marked `[DRAFT]` or `[APPROVED]` throughout the overlap reports. An overlap with an approved PR is the expensive kind: resolving it means a push, and a push resets the approval.
+
 This is the moment to choose: fold your change into that PR, make yours separate and agree a merge order, or wait. Once both PRs exist and one has been approved, every push to resolve the overlap resets the approval.
 
 A path that doesn't exist on the base branch gets a note, so a mistyped path doesn't pass as "no PR touches this file".

@@ -16,6 +16,7 @@ type openPR struct {
 	Number      int    `json:"number"`
 	Title       string `json:"title"`
 	IsDraft     bool   `json:"isDraft"`
+	Review      string `json:"reviewDecision"`
 	HeadRefName string `json:"headRefName"`
 	HeadRefOid  string `json:"headRefOid"`
 	Author      struct {
@@ -36,7 +37,7 @@ query($q: String!, $after: String) {
     pageInfo { hasNextPage endCursor }
     nodes {
       ... on PullRequest {
-        number title isDraft headRefName headRefOid
+        number title isDraft reviewDecision headRefName headRefOid
         author { login }
         files(first: 100) { totalCount nodes { path } }
       }
@@ -171,6 +172,9 @@ func prLabel(p openPR) string {
 	draft := ""
 	if p.IsDraft {
 		draft = "[DRAFT] "
+	} else if p.Review == "APPROVED" {
+		// Resolving an overlap means pushing, and a push resets the approval.
+		draft = "[APPROVED] "
 	}
 	title := p.Title
 	if len(title) > 50 {

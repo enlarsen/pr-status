@@ -27,7 +27,13 @@ const overlapSlack = 3
 func runCrossPR(gql *api.GraphQLClient, rest *api.RESTClient, owner, name string, mine []pr, allAuthors, includeBulk bool) int {
 	entries := map[int]crossEntry{}
 	for _, p := range mine {
-		entries[p.Number] = crossEntry{p.Number, shortTitle(fmt.Sprintf("#%-5d  %s", p.Number, p.Title)), true}
+		mark := ""
+		if p.IsDraft {
+			mark = "[DRAFT] "
+		} else if p.ReviewDecision == "APPROVED" {
+			mark = "[APPROVED] "
+		}
+		entries[p.Number] = crossEntry{p.Number, shortTitle(fmt.Sprintf("#%-5d  %s%s", p.Number, mark, p.Title)), true}
 	}
 	if allAuthors {
 		others, _, err := listOpenPRs(gql, rest, owner, name, includeBulk)
